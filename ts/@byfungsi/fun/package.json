@@ -1,6 +1,6 @@
 {
   "name": "@byfungsi/fun",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI-friendly version control for tracking AI file changes",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,6 +17,8 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:native": "cd ../../../ && zig build -Doptimize=ReleaseFast && cp zig-out/lib/libfuncode.* ts/@byfungsi/fun/native/",
+    "dev": "npm run build:native && npm run build",
     "clean": "rm -rf dist",
     "test": "bun test"
   },
@@ -43,8 +45,7 @@
   "homepage": "https://github.com/byfungsi/fun#readme",
   "os": [
     "darwin",
-    "linux",
-    "win32"
+    "linux"
   ],
   "cpu": [
     "x64",

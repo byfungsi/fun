@@ -33,11 +33,6 @@ jobs:
             lib-name: libfuncode-linux-arm64.so
             zig-output: libfuncode.so
 
-          - platform: win32-x64
-            zig-target: x86_64-windows-gnu
-            lib-name: funcode-win32-x64.dll
-            zig-output: funcode.dll
-
     steps:
       - uses: actions/checkout@v4
 
