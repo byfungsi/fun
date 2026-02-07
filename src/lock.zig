@@ -7,8 +7,8 @@ const fs = std.fs;
 
 const storage = @import("storage.zig");
 
-/// Lock expiry time in seconds (5 minutes)
-const LOCK_EXPIRY_SECONDS: i64 = 5 * 60;
+/// Default lock expiry time in seconds (5 minutes)
+pub const DEFAULT_LOCK_EXPIRY_SECONDS: i64 = 5 * 60;
 
 /// A file lock
 pub const FileLock = struct {
@@ -32,11 +32,17 @@ pub const LockManager = struct {
     allocator: Allocator,
     locks_path: []const u8,
     locks: std.StringHashMap(FileLock),
+    default_expiry_seconds: i64,
 
     const Self = @This();
 
-    /// Initialize lock manager
+    /// Initialize lock manager with default expiry (5 minutes)
     pub fn init(allocator: Allocator, session_path: []const u8) !Self {
+        return initWithExpiry(allocator, session_path, DEFAULT_LOCK_EXPIRY_SECONDS);
+    }
+
+    /// Initialize lock manager with custom default expiry
+    pub fn initWithExpiry(allocator: Allocator, session_path: []const u8, expiry_seconds: i64) !Self {
         const locks_path = try std.fs.path.join(allocator, &.{ session_path, "locks.json" });
         errdefer allocator.free(locks_path);
 
@@ -44,6 +50,7 @@ pub const LockManager = struct {
             .allocator = allocator,
             .locks_path = locks_path,
             .locks = std.StringHashMap(FileLock).init(allocator),
+            .default_expiry_seconds = expiry_seconds,
         };
 
         // Load existing locks
@@ -63,8 +70,13 @@ pub const LockManager = struct {
         self.allocator.free(self.locks_path);
     }
 
-    /// Try to acquire a lock on a file
+    /// Try to acquire a lock on a file with default expiry
     pub fn acquire(self: *Self, file_path: []const u8, agent_id: []const u8) !LockResult {
+        return self.acquireWithTimeout(file_path, agent_id, self.default_expiry_seconds);
+    }
+
+    /// Try to acquire a lock on a file with custom expiry timeout
+    pub fn acquireWithTimeout(self: *Self, file_path: []const u8, agent_id: []const u8, expiry_seconds: i64) !LockResult {
         const now = std.time.timestamp();
 
         // Clean up expired locks first
@@ -74,7 +86,7 @@ pub const LockManager = struct {
         if (self.locks.getPtr(file_path)) |existing| {
             if (std.mem.eql(u8, existing.agent_id, agent_id)) {
                 // Same agent, extend the lock
-                existing.expires_at = now + LOCK_EXPIRY_SECONDS;
+                existing.expires_at = now + expiry_seconds;
                 try self.save();
                 return .{ .acquired = existing.* };
             }
@@ -99,7 +111,7 @@ pub const LockManager = struct {
             .file_path = key, // Key and file_path share the same allocation
             .agent_id = agent_owned,
             .acquired_at = now,
-            .expires_at = now + LOCK_EXPIRY_SECONDS,
+            .expires_at = now + expiry_seconds,
         };
 
         try self.locks.put(key, lock);
@@ -215,14 +227,57 @@ pub const LockManager = struct {
 
     /// Load locks from disk
     fn load(self: *Self) !void {
-        const json = storage.readFile(self.allocator, self.locks_path) catch {
+        const json_content = storage.readFile(self.allocator, self.locks_path) catch {
             return; // No locks file yet
         };
-        defer self.allocator.free(json);
+        defer self.allocator.free(json_content);
 
-        // TODO: Implement proper JSON parsing
-        // For now, skip parsing - locks will be empty on load
+        const now = std.time.timestamp();
+
+        // Parse JSON array of locks
+        const parsed = std.json.parseFromSlice([]const LockJson, self.allocator, json_content, .{}) catch {
+            return; // Invalid JSON, start fresh
+        };
+        defer parsed.deinit();
+
+        // Load each lock (skip expired ones)
+        for (parsed.value) |lock_json| {
+            // Skip expired locks
+            if (lock_json.expires_at < now) {
+                continue;
+            }
+
+            // Duplicate strings for ownership
+            const key = self.allocator.dupe(u8, lock_json.file_path) catch continue;
+            errdefer self.allocator.free(key);
+
+            const agent_owned = self.allocator.dupe(u8, lock_json.agent_id) catch {
+                self.allocator.free(key);
+                continue;
+            };
+
+            const lock = FileLock{
+                .file_path = key,
+                .agent_id = agent_owned,
+                .acquired_at = lock_json.acquired_at,
+                .expires_at = lock_json.expires_at,
+            };
+
+            self.locks.put(key, lock) catch {
+                self.allocator.free(key);
+                self.allocator.free(agent_owned);
+                continue;
+            };
+        }
     }
+};
+
+/// JSON representation of a lock (for parsing)
+const LockJson = struct {
+    file_path: []const u8,
+    agent_id: []const u8,
+    acquired_at: i64,
+    expires_at: i64,
 };
 
 // ============ Tests ============
@@ -289,4 +344,58 @@ test "LockManager isLocked" {
     const lock2 = try manager.isLocked("src/main.zig");
     try std.testing.expect(lock2 != null);
     try std.testing.expectEqualStrings("agent-1", lock2.?.agent_id);
+}
+
+test "LockManager persistence across instances" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = "/tmp/funcode-test-locks-persist";
+
+    try storage.ensureDirPath(allocator, tmp_dir);
+    defer fs.deleteTreeAbsolute(tmp_dir) catch {};
+
+    // First manager: acquire a lock
+    {
+        var manager1 = try LockManager.init(allocator, tmp_dir);
+        defer manager1.deinit();
+
+        const result = try manager1.acquire("src/config.ts", "agent-1");
+        try std.testing.expect(result == .acquired);
+    }
+
+    // Second manager: should see the lock from disk
+    {
+        var manager2 = try LockManager.init(allocator, tmp_dir);
+        defer manager2.deinit();
+
+        // Check lock is visible
+        const lock = try manager2.isLocked("src/config.ts");
+        try std.testing.expect(lock != null);
+        try std.testing.expectEqualStrings("agent-1", lock.?.agent_id);
+
+        // Different agent should not be able to acquire
+        const result = try manager2.acquire("src/config.ts", "agent-2");
+        try std.testing.expect(result == .already_locked);
+        try std.testing.expectEqualStrings("agent-1", result.already_locked.holder);
+    }
+}
+
+test "LockManager acquireWithTimeout" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = "/tmp/funcode-test-locks-timeout";
+
+    try storage.ensureDirPath(allocator, tmp_dir);
+    defer fs.deleteTreeAbsolute(tmp_dir) catch {};
+
+    var manager = try LockManager.init(allocator, tmp_dir);
+    defer manager.deinit();
+
+    // Acquire with custom timeout (60 seconds)
+    const result = try manager.acquireWithTimeout("src/main.zig", "agent-1", 60);
+    try std.testing.expect(result == .acquired);
+
+    // Verify expiry is approximately 60 seconds from now
+    const now = std.time.timestamp();
+    const expires_at = result.acquired.expires_at;
+    try std.testing.expect(expires_at > now);
+    try std.testing.expect(expires_at <= now + 60);
 }

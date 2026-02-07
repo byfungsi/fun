@@ -2,13 +2,78 @@
 
 AI-friendly version control for tracking AI file changes. Built with Zig + TypeScript.
 
-## Features
+## Why Funcode?
 
-- **Track AI Changes** - Record every file modification made by AI agents
-- **Undo/Redo** - Revert to any previous version instantly
-- **Conflict Detection** - Detect when humans modify files between AI edits
-- **Multi-Agent Support** - File locking for coordinating multiple AI agents
-- **Fast & Lightweight** - Native Zig core with minimal overhead
+When AI agents edit your code, you need visibility and control:
+- What did the AI change?
+- Can I undo just this one tool call?
+- What happens if I edit a file while the AI is working?
+- How do I coordinate multiple AI agents?
+
+Funcode solves these problems.
+
+## Core Capabilities
+
+### 1. Undo/Redo for AI Changes
+
+| Capability | Description |
+|------------|-------------|
+| Single file revert | Undo AI changes to one file, restore to original or any version |
+| Full session revert | "Undo everything the AI did" - restore all files to pre-AI state |
+| Selective undo | With metadata: undo just one tool call, or one message's changes |
+| Non-destructive | User's manual edits are detected (conflict), not blindly overwritten |
+
+**User story:** "The AI fucked up my auth module. Let me just revert that file."
+
+### 2. AI Change Attribution & Visibility
+
+| Capability | Description |
+|------------|-------------|
+| Change history | See every file the AI touched, with diffs and timestamps |
+| Agent ID tracking | Know which agent (if multi-agent) made which change |
+| Stats per change | +15 lines, -3 lines per version |
+| Message linking | With metadata: "This change came from tool call X in message Y" |
+
+**User story:** "Show me what the AI changed in the last 5 tool calls."
+
+### 3. Conflict Detection
+
+| Capability | Description |
+|------------|-------------|
+| Human edit detection | If user edits a file the AI was tracking, funcode detects it |
+| Diff between expected/actual | Shows what the human changed |
+| Resolution options | Accept human changes, revert to AI's version, or merge |
+
+**User story:** "I edited the file while the AI was thinking. It should know that."
+
+### 4. Multi-Agent Coordination
+
+| Capability | Description |
+|------------|-------------|
+| File locking | Agent A locks `config.ts`, Agent B waits or skips |
+| Lock expiry | 5-minute timeout prevents deadlocks |
+| Configurable timeout | Custom lock duration per file |
+| Session awareness | Agents can query what files others are touching |
+
+**User story:** "I have 3 AI agents working in parallel - they shouldn't conflict."
+
+```typescript
+// Agent 1 locks a file before editing
+const lockResult = await tracker.lock("config.ts");
+if (!lockResult.acquired) {
+  console.log(`File locked by ${lockResult.holder}, expires at ${lockResult.expiresAt}`);
+  return; // Skip this file
+}
+
+try {
+  // Safe to edit - we hold the lock
+  const content = await Bun.file("config.ts").text();
+  // ... make changes ...
+  await tracker.track("config.ts", content, newContent);
+} finally {
+  await tracker.unlock("config.ts");
+}
+```
 
 ## Installation
 
@@ -27,18 +92,25 @@ import { loadOrCreateSession, FileTracker } from "@byfungsi/fun";
 const session = await loadOrCreateSession("/path/to/project");
 const tracker = new FileTracker(session, "my-ai-agent");
 
-// Track a file change
+// Track a file change with metadata
 const beforeContent = await Bun.file("src/main.ts").text();
 // ... AI makes changes ...
 const afterContent = await Bun.file("src/main.ts").text();
 
-await tracker.track("src/main.ts", beforeContent, afterContent, "Updated imports");
+await tracker.track("src/main.ts", beforeContent, afterContent, {
+  message: "Updated imports",
+  metadata: {
+    toolCallId: "call_abc123",
+    model: "claude-3-opus",
+    promptTokens: 1500,
+  }
+});
 
 // Revert if needed
 await tracker.revert("src/main.ts");
 
 // Or revert to a specific version
-await tracker.revert("src/main.ts", 2);
+await session.revertFile("src/main.ts", 2);
 ```
 
 ## API
@@ -67,14 +139,14 @@ import { FileTracker } from "@byfungsi/fun";
 
 const tracker = new FileTracker(session, "agent-id");
 
-// Track a change
-await tracker.track(filePath, before, after, "commit message");
+// Track a change with metadata
+await tracker.track(filePath, before, after, {
+  message: "commit message",
+  metadata: { toolCallId: "call_123", anyKey: "anyValue" }
+});
 
 // Revert to original
 await tracker.revert(filePath);
-
-// Revert to specific version
-await tracker.revert(filePath, 3);
 
 // Check for conflicts before editing
 const check = await tracker.preCheck(filePath);
@@ -82,6 +154,61 @@ if (check.hasConflict) {
   console.log("File was modified externally!");
   console.log(check.diff);
 }
+
+// Lock a file for exclusive editing
+const lockResult = await tracker.lock(filePath);
+if (lockResult.acquired) {
+  // Edit safely, then unlock
+  await tracker.unlock(filePath);
+}
+
+// Check if a file is locked
+const lockInfo = await tracker.isLocked(filePath);
+if (lockInfo) {
+  console.log(`Locked by ${lockInfo.agentId}`);
+}
+```
+
+### Session Methods
+
+```typescript
+// Track change directly on session
+const version = await session.trackChange({
+  filePath: "src/app.ts",
+  beforeContent: oldCode,
+  afterContent: newCode,
+  agentId: "my-agent",
+  message: "Refactored auth",
+  metadata: { toolCallId: "call_abc123" }
+});
+
+// Get version history
+const history = await session.getHistory(10); // last 10 versions
+for (const v of history) {
+  console.log(`v${v.num}: ${v.filePath} (+${v.additions}/-${v.deletions})`);
+  console.log(`  Agent: ${v.agentId}, Message: ${v.message}`);
+  console.log(`  Metadata:`, v.metadata);
+}
+
+// Revert a file to specific version
+await session.revertFile("src/app.ts", 3);
+
+// Revert all files to original state
+await session.revertAll();
+
+// Get status of all tracked files
+const status = await session.getStatus();
+console.log(`Tracking ${status.files.length} files, version ${status.currentVersion}`);
+
+// Lock management (lower-level API)
+const lockResult = await session.acquireLock("file.ts", "agent-1");
+const lockInfo = await session.isLocked("file.ts");
+await session.releaseLock("file.ts", "agent-1");
+
+// Custom lock timeout (in seconds)
+const lockResult = await session.acquireLock("file.ts", "agent-1", { 
+  timeoutSeconds: 60  // 1 minute instead of default 5 minutes
+});
 ```
 
 ### Low-level Functions
@@ -100,7 +227,7 @@ console.log(`+${stats.additions} -${stats.deletions}`);
 const contentHash = hash("file content");
 
 // Get library version
-console.log(version()); // "0.1.0"
+console.log(version()); // "0.2.1"
 ```
 
 ## How It Works
@@ -116,7 +243,7 @@ Funcode stores session data in `~/.funcode/sessions/{sessionID}/`:
 ├── patches/           # Unified diffs
 │   ├── 0001.diff
 │   └── 0002.diff
-└── versions/          # Version metadata
+└── versions/          # Version metadata (includes custom metadata)
     ├── 0001.json
     └── 0002.json
 ```
@@ -126,6 +253,7 @@ Key design decisions:
 - **Content-addressed storage** - Deduplicates identical files
 - **Unified diff format** - Standard patch format, human-readable
 - **Session-based** - Each AI session gets isolated tracking
+- **Flexible metadata** - Store any JSON-serializable data with each version
 
 ## Development
 

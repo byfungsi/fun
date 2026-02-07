@@ -143,11 +143,27 @@ const symbols = {
   // Lock management
   fun_lock_acquire: {
     args: [FFIType.cstring, FFIType.cstring, FFIType.cstring],
-    returns: FFIType.ptr,
+    returns: FFIType.ptr, // LockResult struct
   },
   fun_lock_release: {
     args: [FFIType.cstring, FFIType.cstring, FFIType.cstring],
     returns: FFIType.bool,
+  },
+  fun_lock_acquire_with_timeout: {
+    args: [FFIType.cstring, FFIType.cstring, FFIType.cstring, FFIType.i64],
+    returns: FFIType.ptr, // LockResult struct
+  },
+  fun_lock_is_locked: {
+    args: [FFIType.cstring, FFIType.cstring],
+    returns: FFIType.ptr, // LockInfo struct
+  },
+  fun_lock_result_free: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
+  fun_lock_info_free: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
   },
 } as const;
 
@@ -217,6 +233,67 @@ function parsePatchStats(statsPtr: Pointer): PatchStatsRaw {
     hunks: view.getUint32(8, true),
     isEmpty: view.getUint8(12) !== 0,
   };
+}
+
+// LockResult struct layout (from c_api.zig):
+// - acquired: bool (1 byte, padded to 8)
+// - holder_ptr: ?[*]u8 (8 bytes)
+// - holder_len: usize (8 bytes)
+// - expires_at: i64 (8 bytes)
+// Total: 32 bytes with padding
+
+interface LockResultRaw {
+  acquired: boolean;
+  holder: string | null;
+  expiresAt: number;
+}
+
+function parseLockResult(resultPtr: Pointer): LockResultRaw {
+  const view = new DataView(toArrayBuffer(resultPtr, 0, 32));
+  const acquired = view.getUint8(0) !== 0;
+  const holderPtr = Number(view.getBigUint64(8, true));
+  const holderLen = Number(view.getBigUint64(16, true));
+  const expiresAt = Number(view.getBigInt64(24, true));
+
+  let holder: string | null = null;
+  if (holderPtr !== 0 && holderLen > 0) {
+    const holderBuf = toArrayBuffer(holderPtr as unknown as Pointer, 0, holderLen);
+    holder = new TextDecoder().decode(holderBuf);
+  }
+
+  return { acquired, holder, expiresAt };
+}
+
+// LockInfo struct layout (from c_api.zig):
+// - is_locked: bool (1 byte, padded to 8)
+// - agent_id_ptr: ?[*]u8 (8 bytes)
+// - agent_id_len: usize (8 bytes)
+// - acquired_at: i64 (8 bytes)
+// - expires_at: i64 (8 bytes)
+// Total: 40 bytes with padding
+
+interface LockInfoRaw {
+  isLocked: boolean;
+  agentId: string | null;
+  acquiredAt: number;
+  expiresAt: number;
+}
+
+function parseLockInfo(infoPtr: Pointer): LockInfoRaw {
+  const view = new DataView(toArrayBuffer(infoPtr, 0, 40));
+  const isLocked = view.getUint8(0) !== 0;
+  const agentIdPtr = Number(view.getBigUint64(8, true));
+  const agentIdLen = Number(view.getBigUint64(16, true));
+  const acquiredAt = Number(view.getBigInt64(24, true));
+  const expiresAt = Number(view.getBigInt64(32, true));
+
+  let agentId: string | null = null;
+  if (agentIdPtr !== 0 && agentIdLen > 0) {
+    const agentIdBuf = toArrayBuffer(agentIdPtr as unknown as Pointer, 0, agentIdLen);
+    agentId = new TextDecoder().decode(agentIdBuf);
+  }
+
+  return { isLocked, agentId, acquiredAt, expiresAt };
 }
 
 // Export FFI functions
@@ -337,5 +414,84 @@ export const ffi = {
     }
 
     return { success: false, errorCode: result.errorCode };
+  },
+
+  /** Acquire a lock on a file */
+  lockAcquire(
+    sessionPath: string,
+    filePath: string,
+    agentId: string
+  ): LockResultRaw {
+    const sessionPathBuf = new TextEncoder().encode(sessionPath + "\0");
+    const filePathBuf = new TextEncoder().encode(filePath + "\0");
+    const agentIdBuf = new TextEncoder().encode(agentId + "\0");
+
+    const resultPtr = getLib().symbols.fun_lock_acquire(
+      ptr(sessionPathBuf),
+      ptr(filePathBuf),
+      ptr(agentIdBuf)
+    );
+
+    const result = parseLockResult(resultPtr as Pointer);
+    getLib().symbols.fun_lock_result_free(resultPtr);
+    return result;
+  },
+
+  /** Acquire a lock on a file with custom timeout */
+  lockAcquireWithTimeout(
+    sessionPath: string,
+    filePath: string,
+    agentId: string,
+    timeoutSeconds: number
+  ): LockResultRaw {
+    const sessionPathBuf = new TextEncoder().encode(sessionPath + "\0");
+    const filePathBuf = new TextEncoder().encode(filePath + "\0");
+    const agentIdBuf = new TextEncoder().encode(agentId + "\0");
+
+    const resultPtr = getLib().symbols.fun_lock_acquire_with_timeout(
+      ptr(sessionPathBuf),
+      ptr(filePathBuf),
+      ptr(agentIdBuf),
+      BigInt(timeoutSeconds)
+    );
+
+    const result = parseLockResult(resultPtr as Pointer);
+    getLib().symbols.fun_lock_result_free(resultPtr);
+    return result;
+  },
+
+  /** Release a lock on a file */
+  lockRelease(
+    sessionPath: string,
+    filePath: string,
+    agentId: string
+  ): boolean {
+    const sessionPathBuf = new TextEncoder().encode(sessionPath + "\0");
+    const filePathBuf = new TextEncoder().encode(filePath + "\0");
+    const agentIdBuf = new TextEncoder().encode(agentId + "\0");
+
+    return getLib().symbols.fun_lock_release(
+      ptr(sessionPathBuf),
+      ptr(filePathBuf),
+      ptr(agentIdBuf)
+    ) as boolean;
+  },
+
+  /** Check if a file is locked */
+  lockIsLocked(
+    sessionPath: string,
+    filePath: string
+  ): LockInfoRaw {
+    const sessionPathBuf = new TextEncoder().encode(sessionPath + "\0");
+    const filePathBuf = new TextEncoder().encode(filePath + "\0");
+
+    const infoPtr = getLib().symbols.fun_lock_is_locked(
+      ptr(sessionPathBuf),
+      ptr(filePathBuf)
+    );
+
+    const info = parseLockInfo(infoPtr as Pointer);
+    getLib().symbols.fun_lock_info_free(infoPtr);
+    return info;
   },
 };

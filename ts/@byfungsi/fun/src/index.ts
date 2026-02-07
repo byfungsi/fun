@@ -16,7 +16,10 @@
  * // ... AI makes changes ...
  * const afterContent = await readFile("src/main.ts", "utf-8");
  *
- * await tracker.track("src/main.ts", beforeContent, afterContent, "Updated imports");
+ * await tracker.track("src/main.ts", beforeContent, afterContent, {
+ *   message: "Updated imports",
+ *   metadata: { toolCallId: "call_123" }
+ * });
  *
  * // Revert if needed
  * await tracker.revert("src/main.ts");
@@ -31,7 +34,7 @@ export {
   loadOrCreateSession,
 } from "./session";
 
-export { FileTracker } from "./tracker";
+export { FileTracker, type TrackOptions, type LockOptions } from "./tracker";
 
 // Type exports
 export type {
@@ -46,6 +49,7 @@ export type {
   PreCheckResult,
   FileLock,
   LockResult,
+  AcquireLockOptions,
   Resolution,
   StatusInfo,
 } from "./types";

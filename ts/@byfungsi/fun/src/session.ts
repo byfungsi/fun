@@ -15,6 +15,9 @@ import type {
   PreCheckResult,
   StatusInfo,
   VersionNum,
+  FileLock,
+  LockResult,
+  AcquireLockOptions,
 } from "./types";
 import { FunError, ErrorCode } from "./types";
 
@@ -144,7 +147,7 @@ export class Session {
   async trackChange(opts: TrackChangeOptions): Promise<Version> {
     this.ensureInitialized();
 
-    const { filePath, beforeContent, afterContent, agentId, message } = opts;
+    const { filePath, beforeContent, afterContent, agentId, message, metadata } = opts;
 
     // Generate diff using native library
     const result = ffi.patchGenerate(beforeContent, afterContent, filePath);
@@ -168,6 +171,7 @@ export class Session {
         parentVersion: this.currentVersion > 0 ? this.currentVersion : null,
         additions: 0,
         deletions: 0,
+        metadata,
       };
     }
 
@@ -215,6 +219,7 @@ export class Session {
         this.currentVersion > 1 ? this.currentVersion - 1 : null,
       additions: stats.additions,
       deletions: stats.deletions,
+      metadata,
     };
 
     // Store version metadata
@@ -422,6 +427,73 @@ export class Session {
     }
 
     return { hasConflict: false };
+  }
+
+  // ============ Lock Management ============
+
+  /**
+   * Acquire a lock on a file.
+   * Returns { acquired: true, lock } on success.
+   * Returns { acquired: false, holder, expiresAt } if locked by another agent.
+   */
+  async acquireLock(
+    filePath: string,
+    agentId: string,
+    options?: AcquireLockOptions
+  ): Promise<LockResult> {
+    this.ensureInitialized();
+
+    const timeoutSeconds = options?.timeoutSeconds;
+    const result = timeoutSeconds
+      ? ffi.lockAcquireWithTimeout(this.sessionPath, filePath, agentId, timeoutSeconds)
+      : ffi.lockAcquire(this.sessionPath, filePath, agentId);
+
+    if (result.acquired) {
+      return {
+        acquired: true,
+        lock: {
+          filePath,
+          agentId,
+          acquiredAt: Math.floor(Date.now() / 1000), // Approximate, actual is in Zig
+          expiresAt: result.expiresAt,
+        },
+      };
+    }
+
+    return {
+      acquired: false,
+      holder: result.holder ?? "unknown",
+      expiresAt: result.expiresAt,
+    };
+  }
+
+  /**
+   * Release a lock on a file.
+   * Returns true if lock was released, false if not held by this agent.
+   */
+  async releaseLock(filePath: string, agentId: string): Promise<boolean> {
+    this.ensureInitialized();
+    return ffi.lockRelease(this.sessionPath, filePath, agentId);
+  }
+
+  /**
+   * Check if a file is locked.
+   * Returns lock info if locked, null if not locked.
+   */
+  async isLocked(filePath: string): Promise<FileLock | null> {
+    this.ensureInitialized();
+    const info = ffi.lockIsLocked(this.sessionPath, filePath);
+
+    if (!info.isLocked) {
+      return null;
+    }
+
+    return {
+      filePath,
+      agentId: info.agentId ?? "unknown",
+      acquiredAt: info.acquiredAt,
+      expiresAt: info.expiresAt,
+    };
   }
 
   /**

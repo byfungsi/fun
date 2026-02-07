@@ -39,6 +39,8 @@ export interface Version {
   parentVersion: VersionNum | null;
   additions: number;
   deletions: number;
+  /** Custom metadata stored with this version */
+  metadata?: Record<string, unknown>;
 }
 
 /** Patch statistics */
@@ -56,6 +58,8 @@ export interface TrackChangeOptions {
   afterContent: string;
   agentId: string;
   message?: string;
+  /** Custom metadata to store with this version (e.g., toolCallId, model, tokens) */
+  metadata?: Record<string, unknown>;
 }
 
 /** Pre-check result for conflict detection */
@@ -78,6 +82,12 @@ export interface FileLock {
 export type LockResult =
   | { acquired: true; lock: FileLock }
   | { acquired: false; holder: string; expiresAt: number };
+
+/** Options for acquiring a lock */
+export interface AcquireLockOptions {
+  /** Lock timeout in seconds (default: 300 = 5 minutes) */
+  timeoutSeconds?: number;
+}
 
 /** Resolution for conflicts */
 export type Resolution =

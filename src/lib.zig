@@ -55,6 +55,10 @@ comptime {
     _ = &c_api.fun_session_close;
     _ = &c_api.fun_lock_acquire;
     _ = &c_api.fun_lock_release;
+    _ = &c_api.fun_lock_acquire_with_timeout;
+    _ = &c_api.fun_lock_is_locked;
+    _ = &c_api.fun_lock_result_free;
+    _ = &c_api.fun_lock_info_free;
 }
 
 // Tests
