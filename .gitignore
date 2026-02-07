@@ -1,0 +1,47 @@
+# Zig
+.zig-cache/
+zig-out/
+*.o
+*.a
+
+# TypeScript / Node
+node_modules/
+dist/
+*.tsbuildinfo
+.npm/
+.pnpm-store/
+
+# Bun lockfile (optional - uncomment to ignore)
+# bun.lock
+
+# Native libraries (built by CI, not committed)
+*.dylib
+*.so
+*.dll
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+/tmp/
+*.tmp
+
+# Funcode session data (created at runtime)
+.funcode/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*

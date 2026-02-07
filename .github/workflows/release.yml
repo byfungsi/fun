@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # Build native libraries for all platforms
+  build-native:
+    name: Build (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: darwin-arm64
+            zig-target: aarch64-macos
+            lib-name: libfuncode-darwin-arm64.dylib
+            zig-output: libfuncode.dylib
+
+          - platform: darwin-x64
+            zig-target: x86_64-macos
+            lib-name: libfuncode-darwin-x64.dylib
+            zig-output: libfuncode.dylib
+
+          - platform: linux-x64
+            zig-target: x86_64-linux-gnu
+            lib-name: libfuncode-linux-x64.so
+            zig-output: libfuncode.so
+
+          - platform: linux-arm64
+            zig-target: aarch64-linux-gnu
+            lib-name: libfuncode-linux-arm64.so
+            zig-output: libfuncode.so
+
+          - platform: win32-x64
+            zig-target: x86_64-windows-gnu
+            lib-name: funcode-win32-x64.dll
+            zig-output: funcode.dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build for ${{ matrix.platform }}
+        run: |
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig-target }}
+          mkdir -p artifacts
+          cp zig-out/lib/${{ matrix.zig-output }} artifacts/${{ matrix.lib-name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: artifacts/${{ matrix.lib-name }}
+          retention-days: 7
+
+  # Publish to npm
+  publish-npm:
+    name: Publish to npm
+    needs: build-native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ts/@byfungsi/fun/native
+          pattern: native-*
+          merge-multiple: true
+
+      - name: List native libraries
+        run: ls -la ts/@byfungsi/fun/native/
+
+      - name: Install dependencies
+        working-directory: ts/@byfungsi/fun
+        run: bun install
+
+      - name: Build TypeScript
+        working-directory: ts/@byfungsi/fun
+        run: bun run build
+
+      - name: Verify build
+        working-directory: ts/@byfungsi/fun
+        run: |
+          ls -la dist/
+          ls -la native/
+
+      - name: Publish to npm
+        working-directory: ts/@byfungsi/fun
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Create GitHub Release with binaries
+  create-release:
+    name: Create GitHub Release
+    needs: build-native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: native-*
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}

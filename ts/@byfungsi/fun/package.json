@@ -1,0 +1,63 @@
+{
+  "name": "@byfungsi/fun",
+  "version": "0.1.0",
+  "description": "AI-friendly version control for tracking AI file changes",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "native"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "bun test"
+  },
+  "keywords": [
+    "ai",
+    "version-control",
+    "diff",
+    "patch",
+    "undo",
+    "redo",
+    "ai-agent",
+    "file-tracking",
+    "funcode"
+  ],
+  "author": "Byfungsi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/byfungsi/fun.git"
+  },
+  "bugs": {
+    "url": "https://github.com/byfungsi/fun/issues"
+  },
+  "homepage": "https://github.com/byfungsi/fun#readme",
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/bun": "^1.0.0"
+  },
+  "peerDependencies": {
+    "bun": ">=1.0.0"
+  }
+}
