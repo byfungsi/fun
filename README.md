@@ -21,6 +21,7 @@ Funcode solves these problems.
 | Single file revert | Undo AI changes to one file, restore to original or any version |
 | Full session revert | "Undo everything the AI did" - restore all files to pre-AI state |
 | Selective undo | With metadata: undo just one tool call, or one message's changes |
+| Surgical revert | Undo a specific version without affecting other changes |
 | Non-destructive | User's manual edits are detected (conflict), not blindly overwritten |
 
 **User story:** "The AI fucked up my auth module. Let me just revert that file."
@@ -30,17 +31,21 @@ Funcode solves these problems.
 | Capability | Description |
 |------------|-------------|
 | Change history | See every file the AI touched, with diffs and timestamps |
-| Agent ID tracking | Know which agent (if multi-agent) made which change |
+| Editor tracking | Know which editor/agent made which change |
 | Stats per change | +15 lines, -3 lines per version |
 | Message linking | With metadata: "This change came from tool call X in message Y" |
+| Filter by editor | Get history for just one agent in multi-agent setups |
 
 **User story:** "Show me what the AI changed in the last 5 tool calls."
 
-### 3. Conflict Detection
+### 3. External Change Detection
 
 | Capability | Description |
 |------------|-------------|
+| Auto-detect changes | Sync detects files modified outside funcode |
 | Human edit detection | If user edits a file the AI was tracking, funcode detects it |
+| Deletion tracking | Detect when files are deleted externally |
+| Progress callback | Track sync progress for large projects |
 | Diff between expected/actual | Shows what the human changed |
 | Resolution options | Accept human changes, revert to AI's version, or merge |
 
@@ -137,7 +142,7 @@ Convenience wrapper for tracking file changes:
 ```typescript
 import { FileTracker } from "@byfungsi/fun";
 
-const tracker = new FileTracker(session, "agent-id");
+const tracker = new FileTracker(session, "my-editor");
 
 // Track a change with metadata
 await tracker.track(filePath, before, after, {
@@ -165,7 +170,7 @@ if (lockResult.acquired) {
 // Check if a file is locked
 const lockInfo = await tracker.isLocked(filePath);
 if (lockInfo) {
-  console.log(`Locked by ${lockInfo.agentId}`);
+  console.log(`Locked by ${lockInfo.editor}`);
 }
 ```
 
@@ -177,18 +182,21 @@ const version = await session.trackChange({
   filePath: "src/app.ts",
   beforeContent: oldCode,
   afterContent: newCode,
-  agentId: "my-agent",
+  editor: "my-agent",
   message: "Refactored auth",
   metadata: { toolCallId: "call_abc123" }
 });
 
 // Get version history
-const history = await session.getHistory(10); // last 10 versions
+const history = await session.getHistory({ limit: 10 }); // last 10 versions
 for (const v of history) {
   console.log(`v${v.num}: ${v.filePath} (+${v.additions}/-${v.deletions})`);
-  console.log(`  Agent: ${v.agentId}, Message: ${v.message}`);
+  console.log(`  Editor: ${v.editor}, Message: ${v.message}`);
   console.log(`  Metadata:`, v.metadata);
 }
+
+// Filter history by editor
+const myHistory = await session.getHistory({ editor: "my-agent" });
 
 // Revert a file to specific version
 await session.revertFile("src/app.ts", 3);
@@ -211,6 +219,119 @@ const lockResult = await session.acquireLock("file.ts", "agent-1", {
 });
 ```
 
+### Sync API
+
+Detect external changes to tracked files:
+
+```typescript
+// Sync with progress callback (useful after git operations)
+const syncResult = await session.sync({
+  onProgress: ({ phase, current, total, currentFile }) => {
+    console.log(`[${phase}] ${current}/${total} - ${currentFile}`);
+  }
+});
+
+console.log(`Checked: ${syncResult.checkedFiles}`);
+console.log(`External changes: ${syncResult.externalChanges}`);
+console.log(`Deleted files: ${syncResult.deletedFiles}`);
+console.log(`Versions created: ${syncResult.capturedVersions.length}`);
+```
+
+### Surgical Revert
+
+Undo a specific version without affecting other changes:
+
+```typescript
+// Check if a version can be reverted
+const canRevert = await session.canRevertVersion(5);
+if (!canRevert.canRevert) {
+  console.log(`Cannot revert: ${canRevert.reason}`);
+}
+
+// Surgically revert a version (applies inverse patch)
+const result = await session.revertVersion(5);
+
+if (result.success) {
+  console.log(`Reverted to version ${result.newVersion.num}`);
+} else {
+  // Conflict - show markers for manual resolution
+  console.log("Conflict detected!");
+  console.log(result.conflict.conflictMarkers);
+  
+  // Options for handling conflicts:
+  // 1. Show to user for manual resolution
+  // 2. Write conflict markers to file
+  // 3. Let user choose which version to keep
+}
+```
+
+### Time-Travel API
+
+Query, navigate, and revert changes with precision:
+
+```typescript
+// Get history filtered by metadata
+const toolCallVersions = await session.getHistoryByMetadata({ 
+  toolCallId: "call_abc123" 
+});
+
+// Undo all changes from a specific tool call
+const result = await session.revertByMetadata({ toolCallId: "call_abc123" });
+console.log(`Reverted ${result.revertedFiles.length} files`);
+
+// Get the unified diff for any version
+const diff = await session.getDiff(5);
+
+// Get content at any point in history
+const oldContent = await session.getContentAtVersion("src/app.ts", 3);
+
+// Get history for a specific file
+const fileHistory = await session.getFileHistory("src/app.ts");
+
+// Filter file history by editor
+const myFileHistory = await session.getFileHistory("src/app.ts", { 
+  editor: "my-agent" 
+});
+```
+
+### File Timeline (for Time-Travel UI)
+
+Build a slider UI to navigate file history:
+
+```typescript
+// Get complete timeline with content at each version
+const timeline = await session.getFileTimeline("src/app.ts");
+
+for (const entry of timeline) {
+  console.log(`Version ${entry.version}:`);
+  console.log(`  Timestamp: ${new Date(entry.timestamp)}`);
+  console.log(`  Editor: ${entry.editor}`);
+  console.log(`  Message: ${entry.message}`);
+  console.log(`  Changes: +${entry.additions}/-${entry.deletions}`);
+  console.log(`  Content: ${entry.content.slice(0, 50)}...`);
+  console.log(`  Metadata:`, entry.metadata);
+}
+
+// Filter timeline by editor
+const myTimeline = await session.getFileTimeline("src/app.ts", { 
+  editor: "my-agent" 
+});
+
+// Jump to any version
+await session.revertFile("src/app.ts", timeline[2].version);
+```
+
+### Session Cleanup
+
+Prune old versions to save disk space:
+
+```typescript
+// Keep only the last 10 versions (renumbers 1-10)
+const pruneResult = await session.prune(10);
+console.log(`Deleted ${pruneResult.deletedVersions} versions`);
+console.log(`Freed ${pruneResult.freedBytes} bytes`);
+```
+
 ### Low-level Functions
 
 ```typescript
@@ -227,7 +348,7 @@ console.log(`+${stats.additions} -${stats.deletions}`);
 const contentHash = hash("file content");
 
 // Get library version
-console.log(version()); // "0.2.1"
+console.log(version()); // "0.4.0"
 ```
 
 ## How It Works

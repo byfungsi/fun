@@ -33,7 +33,8 @@ export interface FileState {
 export interface Version {
   num: VersionNum;
   filePath: string;
-  agentId: string;
+  /** Editor/agent that made this change */
+  editor: string;
   message: string;
   timestamp: number;
   parentVersion: VersionNum | null;
@@ -41,6 +42,8 @@ export interface Version {
   deletions: number;
   /** Custom metadata stored with this version */
   metadata?: Record<string, unknown>;
+  /** True if this version represents a file deletion */
+  deleted?: boolean;
 }
 
 /** Patch statistics */
@@ -56,7 +59,8 @@ export interface TrackChangeOptions {
   filePath: string;
   beforeContent: string;
   afterContent: string;
-  agentId: string;
+  /** Editor/agent making this change */
+  editor: string;
   message?: string;
   /** Custom metadata to store with this version (e.g., toolCallId, model, tokens) */
   metadata?: Record<string, unknown>;
@@ -73,7 +77,8 @@ export interface PreCheckResult {
 /** Lock information */
 export interface FileLock {
   filePath: string;
-  agentId: string;
+  /** Editor/agent holding the lock */
+  editor: string;
   acquiredAt: number;
   expiresAt: number;
 }
@@ -124,4 +129,129 @@ export class FunError extends Error {
     super(message);
     this.name = "FunError";
   }
+}
+
+// ============ Time-Travel API Types ============
+
+/** Entry in a file's timeline for time-travel UI */
+export interface FileTimelineEntry {
+  /** Version number */
+  version: VersionNum;
+  /** Unix timestamp (milliseconds) */
+  timestamp: number;
+  /** Editor/agent that made this change */
+  editor: string;
+  /** Commit message */
+  message: string;
+  /** Unified diff for this version */
+  diff: string;
+  /** Full file content at this version */
+  content: string;
+  /** Lines added */
+  additions: number;
+  /** Lines deleted */
+  deletions: number;
+  /** Custom metadata */
+  metadata?: Record<string, unknown>;
+  /** True if this version represents a file deletion */
+  deleted?: boolean;
+}
+
+/** Result of a prune operation */
+export interface PruneResult {
+  /** Number of versions deleted */
+  deletedVersions: number;
+  /** Approximate bytes freed (patches + version metadata) */
+  freedBytes: number;
+  /** New current version number after renumbering */
+  newCurrentVersion: VersionNum;
+}
+
+/** Result of revertByMetadata operation */
+export interface RevertByMetadataResult {
+  /** File paths that were reverted */
+  revertedFiles: string[];
+  /** Number of versions that matched the filter */
+  versionsMatched: number;
+}
+
+/** Options for getHistory and getHistoryByMetadata */
+export interface HistoryOptions {
+  /** Maximum number of versions to return */
+  limit?: number;
+  /** Filter by editor/agent */
+  editor?: string;
+  /** Include deletion versions (default: true) */
+  includeDeleted?: boolean;
+}
+
+/** Filter for querying versions by metadata */
+export type MetadataFilter = Record<string, unknown>;
+
+// ============ Sync API Types ============
+
+/** Progress information during sync */
+export interface SyncProgress {
+  /** Current phase of the sync */
+  phase: 'scanning' | 'checking' | 'capturing';
+  /** Current file index (1-based) */
+  current: number;
+  /** Total number of files to check */
+  total: number;
+  /** Current file being processed */
+  currentFile?: string;
+}
+
+/** Options for sync operation */
+export interface SyncOptions {
+  /** Callback for progress updates */
+  onProgress?: (progress: SyncProgress) => void;
+}
+
+/** Result of a sync operation */
+export interface SyncResult {
+  /** Number of files checked */
+  checkedFiles: number;
+  /** Number of files with external changes captured */
+  externalChanges: number;
+  /** Number of deleted files captured */
+  deletedFiles: number;
+  /** Version numbers created during sync */
+  capturedVersions: VersionNum[];
+}
+
+// ============ Surgical Revert Types ============
+
+/** Conflict information when surgical revert fails */
+export interface RevertConflict {
+  /** Path to the conflicting file */
+  filePath: string;
+  /** Current content of the file */
+  currentContent: string;
+  /** Expected content (base for inverse patch) */
+  expectedContent: string;
+  /** Content we're trying to revert to */
+  revertedContent: string;
+  /** The inverse patch that failed to apply */
+  inversePatch: string;
+  /** Git-style conflict markers for manual resolution */
+  conflictMarkers: string;
+}
+
+/** Result of a revertVersion operation */
+export interface RevertVersionResult {
+  /** Whether the revert succeeded */
+  success: boolean;
+  /** The new version created (if success) */
+  newVersion?: Version;
+  /** Conflict info for manual resolution (if failed) */
+  conflict?: RevertConflict;
+}
+
+/** Result of canRevertVersion check */
+export interface CanRevertResult {
+  /** Whether the revert can be applied cleanly */
+  canRevert: boolean;
+  /** Reason if revert cannot be applied */
+  reason?: string;
 }

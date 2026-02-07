@@ -607,7 +607,7 @@ pub export fn fun_lock_info_free(info: ?*LockInfo) void {
 
 /// Get library version
 pub export fn fun_version() [*:0]const u8 {
-    return "0.2.1";
+    return "0.4.0";
 }
 
 // ============ Helper Functions ============
@@ -634,7 +634,7 @@ fn errorResult(err: anyerror) CResult {
 
 test "fun_version" {
     const version = fun_version();
-    try std.testing.expectEqualStrings("0.2.1", std.mem.span(version));
+    try std.testing.expectEqualStrings("0.4.0", std.mem.span(version));
 }
 
 test "fun_hash" {

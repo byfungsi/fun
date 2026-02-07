@@ -18,6 +18,17 @@ import type {
   FileLock,
   LockResult,
   AcquireLockOptions,
+  FileTimelineEntry,
+  PruneResult,
+  RevertByMetadataResult,
+  MetadataFilter,
+  HistoryOptions,
+  SyncProgress,
+  SyncOptions,
+  SyncResult,
+  RevertConflict,
+  RevertVersionResult,
+  CanRevertResult,
 } from "./types";
 import { FunError, ErrorCode } from "./types";
 
@@ -147,7 +158,7 @@ export class Session {
   async trackChange(opts: TrackChangeOptions): Promise<Version> {
     this.ensureInitialized();
 
-    const { filePath, beforeContent, afterContent, agentId, message, metadata } = opts;
+    const { filePath, beforeContent, afterContent, editor, message, metadata } = opts;
 
     // Generate diff using native library
     const result = ffi.patchGenerate(beforeContent, afterContent, filePath);
@@ -165,7 +176,7 @@ export class Session {
       return {
         num: this.currentVersion,
         filePath,
-        agentId,
+        editor,
         message: message || "",
         timestamp: Date.now(),
         parentVersion: this.currentVersion > 0 ? this.currentVersion : null,
@@ -212,7 +223,7 @@ export class Session {
     const version: Version = {
       num: this.currentVersion,
       filePath,
-      agentId,
+      editor,
       message: message || "",
       timestamp: Date.now(),
       parentVersion:
@@ -364,17 +375,26 @@ export class Session {
   /**
    * Get version history
    */
-  async getHistory(limit?: number): Promise<Version[]> {
-    const max = limit ?? this.currentVersion;
+  async getHistory(options?: HistoryOptions): Promise<Version[]> {
+    const limit = options?.limit ?? this.currentVersion;
     const versions: Version[] = [];
 
     for (
       let v = this.currentVersion;
-      v > 0 && versions.length < max;
+      v > 0 && versions.length < limit;
       v--
     ) {
       try {
         const meta = await this.loadVersionMeta(v);
+        
+        // Apply filters
+        if (options?.editor && meta.editor !== options.editor) {
+          continue;
+        }
+        if (options?.includeDeleted === false && meta.deleted) {
+          continue;
+        }
+        
         versions.push(meta);
       } catch {
         // Skip if version metadata is missing
@@ -384,12 +404,614 @@ export class Session {
     return versions;
   }
 
+  // ============ Time-Travel API ============
+
+  /**
+   * Get version history filtered by metadata fields.
+   * Returns versions where all specified metadata fields match.
+   */
+  async getHistoryByMetadata(
+    filter: MetadataFilter,
+    options?: HistoryOptions
+  ): Promise<Version[]> {
+    const allVersions = await this.getHistory(options);
+    
+    return allVersions.filter((version) => {
+      if (!version.metadata) return false;
+      
+      // Check if all filter keys match
+      for (const [key, value] of Object.entries(filter)) {
+        if (version.metadata[key] !== value) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Revert all files that were changed by versions matching the metadata filter.
+   * For each affected file, reverts to the state just before the first matching version.
+   */
+  async revertByMetadata(
+    filter: MetadataFilter
+  ): Promise<RevertByMetadataResult> {
+    this.ensureInitialized();
+
+    // Get all versions (oldest first for proper ordering)
+    const allVersions = await this.getHistory();
+    allVersions.reverse(); // Now oldest first
+
+    // Find versions matching the filter
+    const matchingVersions = allVersions.filter((version) => {
+      if (!version.metadata) return false;
+      for (const [key, value] of Object.entries(filter)) {
+        if (version.metadata[key] !== value) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (matchingVersions.length === 0) {
+      return { revertedFiles: [], versionsMatched: 0 };
+    }
+
+    // Group by file and find the target version for each file
+    // (the version just before the first matching version for that file)
+    const fileTargetVersions = new Map<string, VersionNum>();
+
+    for (const version of matchingVersions) {
+      if (!fileTargetVersions.has(version.filePath)) {
+        // Find the version just before this one for this file
+        const previousVersion = allVersions
+          .filter(v => v.filePath === version.filePath && v.num < version.num)
+          .pop(); // Last one before the matching version
+
+        fileTargetVersions.set(
+          version.filePath,
+          previousVersion?.num ?? 0 // 0 means revert to original
+        );
+      }
+    }
+
+    // Revert each file
+    const revertedFiles: string[] = [];
+    for (const [filePath, targetVersion] of fileTargetVersions) {
+      try {
+        await this.revertFile(filePath, targetVersion);
+        revertedFiles.push(filePath);
+      } catch {
+        // Skip files that can't be reverted
+      }
+    }
+
+    return {
+      revertedFiles,
+      versionsMatched: matchingVersions.length,
+    };
+  }
+
+  /**
+   * Get the unified diff for a specific version.
+   */
+  async getDiff(version: VersionNum): Promise<string> {
+    this.ensureInitialized();
+    
+    if (version < 1 || version > this.currentVersion) {
+      throw new FunError(
+        ErrorCode.InvalidArgument,
+        `Version ${version} not found (current: ${this.currentVersion})`
+      );
+    }
+
+    return this.getPatch(version);
+  }
+
+  /**
+   * Get history for a specific file only.
+   */
+  async getFileHistory(filePath: string, options?: HistoryOptions): Promise<Version[]> {
+    const allVersions = await this.getHistory(options);
+    return allVersions.filter((v) => v.filePath === filePath);
+  }
+
+  /**
+   * Get complete timeline for a file, including content at each version.
+   * Useful for time-travel UI with a slider.
+   */
+  async getFileTimeline(filePath: string, options?: HistoryOptions): Promise<FileTimelineEntry[]> {
+    this.ensureInitialized();
+
+    const fileState = this.fileStates.get(filePath);
+    if (!fileState) {
+      throw new FunError(
+        ErrorCode.FileNotTracked,
+        `File not tracked: ${filePath}`
+      );
+    }
+
+    // Get all versions for this file, sorted by version number ascending
+    const fileVersions = await this.getFileHistory(filePath, options);
+    fileVersions.reverse(); // Now oldest first
+
+    const timeline: FileTimelineEntry[] = [];
+
+    // Start with original content
+    let content = await this.getOriginal(fileState.originalHash);
+
+    for (const version of fileVersions) {
+      try {
+        const diff = await this.getPatch(version.num);
+        
+        // Apply patch to get content at this version
+        const applyResult = ffi.patchApply(content, diff);
+        if (applyResult.success && applyResult.result) {
+          content = applyResult.result;
+        }
+
+        timeline.push({
+          version: version.num,
+          timestamp: version.timestamp,
+          editor: version.editor,
+          message: version.message,
+          diff,
+          content,
+          additions: version.additions,
+          deletions: version.deletions,
+          metadata: version.metadata,
+          deleted: version.deleted,
+        });
+      } catch {
+        // Skip versions with missing patches
+      }
+    }
+
+    return timeline;
+  }
+
+  /**
+   * Prune old versions, keeping only the last N versions.
+   * Versions are renumbered 1 to N after pruning.
+   */
+  async prune(keepVersions: number): Promise<PruneResult> {
+    this.ensureInitialized();
+
+    if (keepVersions < 0) {
+      throw new FunError(
+        ErrorCode.InvalidArgument,
+        "keepVersions must be non-negative"
+      );
+    }
+
+    if (this.currentVersion <= keepVersions) {
+      // Nothing to prune
+      return {
+        deletedVersions: 0,
+        freedBytes: 0,
+        newCurrentVersion: this.currentVersion,
+      };
+    }
+
+    const versionsToDelete = this.currentVersion - keepVersions;
+    let freedBytes = 0;
+
+    // Delete old version files and patch files
+    for (let v = 1; v <= versionsToDelete; v++) {
+      const versionFile = join(
+        this.sessionPath,
+        "versions",
+        `${String(v).padStart(4, "0")}.json`
+      );
+      const patchFile = join(
+        this.sessionPath,
+        "patches",
+        `${String(v).padStart(4, "0")}.diff`
+      );
+
+      try {
+        const vStat = await stat(versionFile);
+        freedBytes += vStat.size;
+        await rm(versionFile);
+      } catch {
+        // File doesn't exist
+      }
+
+      try {
+        const pStat = await stat(patchFile);
+        freedBytes += pStat.size;
+        await rm(patchFile);
+      } catch {
+        // File doesn't exist
+      }
+    }
+
+    // Renumber remaining versions: versionsToDelete+1 -> 1, versionsToDelete+2 -> 2, etc.
+    for (let oldV = versionsToDelete + 1; oldV <= this.currentVersion; oldV++) {
+      const newV = oldV - versionsToDelete;
+
+      const oldVersionFile = join(
+        this.sessionPath,
+        "versions",
+        `${String(oldV).padStart(4, "0")}.json`
+      );
+      const newVersionFile = join(
+        this.sessionPath,
+        "versions",
+        `${String(newV).padStart(4, "0")}.json`
+      );
+      const oldPatchFile = join(
+        this.sessionPath,
+        "patches",
+        `${String(oldV).padStart(4, "0")}.diff`
+      );
+      const newPatchFile = join(
+        this.sessionPath,
+        "patches",
+        `${String(newV).padStart(4, "0")}.diff`
+      );
+
+      try {
+        // Update version metadata with new version number
+        const versionMeta = await this.loadVersionMeta(oldV);
+        versionMeta.num = newV;
+        versionMeta.parentVersion = newV > 1 ? newV - 1 : null;
+        await writeFile(newVersionFile, JSON.stringify(versionMeta, null, 2), "utf-8");
+        
+        if (oldVersionFile !== newVersionFile) {
+          await rm(oldVersionFile);
+        }
+      } catch {
+        // Version file doesn't exist
+      }
+
+      try {
+        // Rename patch file
+        const patchContent = await readFile(oldPatchFile, "utf-8");
+        await writeFile(newPatchFile, patchContent, "utf-8");
+        
+        if (oldPatchFile !== newPatchFile) {
+          await rm(oldPatchFile);
+        }
+      } catch {
+        // Patch file doesn't exist
+      }
+    }
+
+    // Update file states to reflect new version numbers
+    for (const [path, state] of this.fileStates) {
+      if (state.lastVersion > versionsToDelete) {
+        this.fileStates.set(path, {
+          ...state,
+          lastVersion: state.lastVersion - versionsToDelete,
+        });
+      }
+    }
+
+    // Update current version
+    this.currentVersion = keepVersions;
+
+    // Save updated state
+    await this.saveMetadata();
+    await this.saveFileStates();
+
+    return {
+      deletedVersions: versionsToDelete,
+      freedBytes,
+      newCurrentVersion: this.currentVersion,
+    };
+  }
+
+  // ============ Sync API ============
+
+  /**
+   * Sync tracked files with filesystem, detecting external changes.
+   * Call this after mass external changes (git operations, etc).
+   */
+  async sync(options?: SyncOptions): Promise<SyncResult> {
+    this.ensureInitialized();
+
+    const result: SyncResult = {
+      checkedFiles: 0,
+      externalChanges: 0,
+      deletedFiles: 0,
+      capturedVersions: [],
+    };
+
+    const files = Array.from(this.fileStates.entries());
+    const total = files.length;
+
+    // Scanning phase
+    options?.onProgress?.({ phase: 'scanning', current: 0, total });
+
+    for (let i = 0; i < files.length; i++) {
+      const [filePath, fileState] = files[i];
+      const fullPath = join(this.projectPath, filePath);
+
+      // Checking phase
+      options?.onProgress?.({
+        phase: 'checking',
+        current: i + 1,
+        total,
+        currentFile: filePath,
+      });
+
+      result.checkedFiles++;
+
+      try {
+        const actualContent = await readFile(fullPath, "utf-8");
+        const actualHash = this.computeHash(actualContent);
+
+        if (actualHash !== fileState.currentHash) {
+          // Capturing phase - file changed externally
+          options?.onProgress?.({
+            phase: 'capturing',
+            current: i + 1,
+            total,
+            currentFile: filePath,
+          });
+
+          const expectedContent = await this.getContentAtVersion(
+            filePath,
+            fileState.lastVersion
+          );
+
+          const version = await this.trackChange({
+            filePath,
+            beforeContent: expectedContent,
+            afterContent: actualContent,
+            editor: "unknown",
+            message: "External change detected",
+          });
+
+          result.externalChanges++;
+          result.capturedVersions.push(version.num);
+        }
+      } catch (e: unknown) {
+        const error = e as NodeJS.ErrnoException;
+        if (error.code === 'ENOENT') {
+          // File deleted externally
+          options?.onProgress?.({
+            phase: 'capturing',
+            current: i + 1,
+            total,
+            currentFile: filePath,
+          });
+
+          const version = await this._trackDeletion(filePath);
+          result.deletedFiles++;
+          result.capturedVersions.push(version.num);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Track a file deletion (internal helper)
+   */
+  private async _trackDeletion(filePath: string): Promise<Version> {
+    const fileState = this.fileStates.get(filePath);
+    if (!fileState) {
+      throw new FunError(
+        ErrorCode.FileNotTracked,
+        `File not tracked: ${filePath}`
+      );
+    }
+
+    const lastContent = await this.getContentAtVersion(
+      filePath,
+      fileState.lastVersion
+    );
+
+    return this.trackChange({
+      filePath,
+      beforeContent: lastContent,
+      afterContent: "",
+      editor: "unknown",
+      message: "File deleted externally",
+      metadata: { deleted: true },
+    });
+  }
+
+  // ============ Surgical Revert API ============
+
+  /**
+   * Check if a version can be reverted surgically.
+   */
+  async canRevertVersion(versionNum: VersionNum): Promise<CanRevertResult> {
+    this.ensureInitialized();
+
+    if (versionNum < 1 || versionNum > this.currentVersion) {
+      return {
+        canRevert: false,
+        reason: `Version ${versionNum} not found (current: ${this.currentVersion})`,
+      };
+    }
+
+    try {
+      const versionMeta = await this.loadVersionMeta(versionNum);
+      const filePath = versionMeta.filePath;
+      const fullPath = join(this.projectPath, filePath);
+
+      // Get the diff for this version and invert it
+      const diff = await this.getPatch(versionNum);
+      const inverseDiff = this.invertPatch(diff);
+
+      // Read current file content
+      let currentContent: string;
+      try {
+        currentContent = await readFile(fullPath, "utf-8");
+      } catch {
+        return {
+          canRevert: false,
+          reason: "File does not exist",
+        };
+      }
+
+      // Try to apply inverse patch
+      const applyResult = ffi.patchApply(currentContent, inverseDiff);
+
+      if (!applyResult.success) {
+        return {
+          canRevert: false,
+          reason: "Inverse patch cannot be applied cleanly - file has diverged",
+        };
+      }
+
+      return { canRevert: true };
+    } catch (e) {
+      return {
+        canRevert: false,
+        reason: `Error checking version: ${e}`,
+      };
+    }
+  }
+
+  /**
+   * Surgically revert a specific version by applying its inverse patch.
+   * Returns conflict info for manual resolution if the patch cannot be applied.
+   */
+  async revertVersion(versionNum: VersionNum): Promise<RevertVersionResult> {
+    this.ensureInitialized();
+
+    if (versionNum < 1 || versionNum > this.currentVersion) {
+      throw new FunError(
+        ErrorCode.InvalidArgument,
+        `Version ${versionNum} not found (current: ${this.currentVersion})`
+      );
+    }
+
+    const versionMeta = await this.loadVersionMeta(versionNum);
+    const filePath = versionMeta.filePath;
+    const fullPath = join(this.projectPath, filePath);
+
+    // Get the diff for this version
+    const diff = await this.getPatch(versionNum);
+
+    // Invert the patch
+    const inverseDiff = this.invertPatch(diff);
+
+    // Read current file content
+    let currentContent: string;
+    try {
+      currentContent = await readFile(fullPath, "utf-8");
+    } catch {
+      currentContent = "";
+    }
+
+    // Try to apply inverse patch
+    const applyResult = ffi.patchApply(currentContent, inverseDiff);
+
+    if (!applyResult.success) {
+      // Get content at version and before version for conflict info
+      const expectedContent = await this.getContentAtVersion(
+        filePath,
+        versionNum
+      );
+      const revertedContent = versionMeta.parentVersion
+        ? await this.getContentAtVersion(filePath, versionMeta.parentVersion)
+        : await this.getOriginal(
+            this.fileStates.get(filePath)?.originalHash ?? ""
+          );
+
+      // Generate conflict markers
+      const conflictMarkers = this.generateConflictMarkers(
+        currentContent,
+        revertedContent,
+        versionNum
+      );
+
+      return {
+        success: false,
+        conflict: {
+          filePath,
+          currentContent,
+          expectedContent,
+          revertedContent,
+          inversePatch: inverseDiff,
+          conflictMarkers,
+        },
+      };
+    }
+
+    // Write new content
+    await mkdir(dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, applyResult.result!, "utf-8");
+
+    // Track this revert as a new version
+    const newVersion = await this.trackChange({
+      filePath,
+      beforeContent: currentContent,
+      afterContent: applyResult.result!,
+      editor: "system",
+      message: `Reverted version ${versionNum}`,
+      metadata: {
+        revertedVersion: versionNum,
+        originalMessage: versionMeta.message,
+      },
+    });
+
+    return { success: true, newVersion };
+  }
+
+  /**
+   * Invert a unified diff (swap + and - lines, swap hunk headers)
+   */
+  private invertPatch(diff: string): string {
+    const lines = diff.split('\n');
+    const inverted: string[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith('--- ')) {
+        inverted.push(line.replace('--- ', '+++ '));
+      } else if (line.startsWith('+++ ')) {
+        inverted.push(line.replace('+++ ', '--- '));
+      } else if (line.startsWith('@@')) {
+        // Swap hunk headers: @@ -old,count +new,count @@ -> @@ -new,count +old,count @@
+        const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@(.*)/);
+        if (match) {
+          const [, oldStart, oldCount, newStart, newCount, rest] = match;
+          const oldPart = oldCount ? `${oldStart},${oldCount}` : oldStart;
+          const newPart = newCount ? `${newStart},${newCount}` : newStart;
+          inverted.push(`@@ -${newPart} +${oldPart} @@${rest || ''}`);
+        } else {
+          inverted.push(line);
+        }
+      } else if (line.startsWith('-')) {
+        inverted.push('+' + line.slice(1));
+      } else if (line.startsWith('+')) {
+        inverted.push('-' + line.slice(1));
+      } else {
+        inverted.push(line);
+      }
+    }
+
+    return inverted.join('\n');
+  }
+
+  /**
+   * Generate git-style conflict markers
+   */
+  private generateConflictMarkers(
+    current: string,
+    reverted: string,
+    versionNum: VersionNum
+  ): string {
+    return `<<<<<<< CURRENT
+${current}
+=======
+${reverted}
+>>>>>>> REVERT (v${versionNum})`;
+  }
+
   /**
    * Pre-check for conflicts before editing
    */
   async preCheck(
     filePath: string,
-    _agentId: string
+    _editor: string
   ): Promise<PreCheckResult> {
     const fileState = this.fileStates.get(filePath);
     if (!fileState) {
@@ -434,26 +1056,26 @@ export class Session {
   /**
    * Acquire a lock on a file.
    * Returns { acquired: true, lock } on success.
-   * Returns { acquired: false, holder, expiresAt } if locked by another agent.
+   * Returns { acquired: false, holder, expiresAt } if locked by another editor.
    */
   async acquireLock(
     filePath: string,
-    agentId: string,
+    editor: string,
     options?: AcquireLockOptions
   ): Promise<LockResult> {
     this.ensureInitialized();
 
     const timeoutSeconds = options?.timeoutSeconds;
     const result = timeoutSeconds
-      ? ffi.lockAcquireWithTimeout(this.sessionPath, filePath, agentId, timeoutSeconds)
-      : ffi.lockAcquire(this.sessionPath, filePath, agentId);
+      ? ffi.lockAcquireWithTimeout(this.sessionPath, filePath, editor, timeoutSeconds)
+      : ffi.lockAcquire(this.sessionPath, filePath, editor);
 
     if (result.acquired) {
       return {
         acquired: true,
         lock: {
           filePath,
-          agentId,
+          editor,
           acquiredAt: Math.floor(Date.now() / 1000), // Approximate, actual is in Zig
           expiresAt: result.expiresAt,
         },
@@ -469,11 +1091,11 @@ export class Session {
 
   /**
    * Release a lock on a file.
-   * Returns true if lock was released, false if not held by this agent.
+   * Returns true if lock was released, false if not held by this editor.
    */
-  async releaseLock(filePath: string, agentId: string): Promise<boolean> {
+  async releaseLock(filePath: string, editor: string): Promise<boolean> {
     this.ensureInitialized();
-    return ffi.lockRelease(this.sessionPath, filePath, agentId);
+    return ffi.lockRelease(this.sessionPath, filePath, editor);
   }
 
   /**
@@ -490,7 +1112,7 @@ export class Session {
 
     return {
       filePath,
-      agentId: info.agentId ?? "unknown",
+      editor: info.agentId ?? "unknown",
       acquiredAt: info.acquiredAt,
       expiresAt: info.expiresAt,
     };
@@ -568,7 +1190,15 @@ export class Session {
     const filename = `${String(version).padStart(4, "0")}.json`;
     const path = join(this.sessionPath, "versions", filename);
     const json = await readFile(path, "utf-8");
-    return JSON.parse(json);
+    const meta = JSON.parse(json);
+    
+    // Backward compatibility: map agentId to editor
+    if (meta.agentId && !meta.editor) {
+      meta.editor = meta.agentId;
+      delete meta.agentId;
+    }
+    
+    return meta;
   }
 
   private async saveMetadata(): Promise<void> {

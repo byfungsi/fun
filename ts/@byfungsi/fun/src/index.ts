@@ -52,6 +52,20 @@ export type {
   AcquireLockOptions,
   Resolution,
   StatusInfo,
+  // Time-Travel API types
+  FileTimelineEntry,
+  PruneResult,
+  RevertByMetadataResult,
+  MetadataFilter,
+  HistoryOptions,
+  // Sync API types
+  SyncProgress,
+  SyncOptions,
+  SyncResult,
+  // Surgical Revert types
+  RevertConflict,
+  RevertVersionResult,
+  CanRevertResult,
 } from "./types";
 
 export { ErrorCode, FunError } from "./types";

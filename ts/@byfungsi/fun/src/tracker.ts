@@ -3,7 +3,21 @@
  */
 
 import { Session } from "./session";
-import type { Version, PreCheckResult, Resolution, FileLock, LockResult } from "./types";
+import type {
+  Version,
+  PreCheckResult,
+  Resolution,
+  FileLock,
+  LockResult,
+  FileTimelineEntry,
+  MetadataFilter,
+  HistoryOptions,
+  VersionNum,
+  SyncOptions,
+  SyncResult,
+  RevertVersionResult,
+  CanRevertResult,
+} from "./types";
 
 /** Options for FileTracker.track() */
 export interface TrackOptions {
@@ -20,12 +34,12 @@ export interface LockOptions {
 }
 
 /**
- * Convenience wrapper for tracking file changes by an agent
+ * Convenience wrapper for tracking file changes by an editor/agent
  */
 export class FileTracker {
   constructor(
     private session: Session,
-    private agentId: string
+    private editor: string
   ) {}
 
   /**
@@ -41,7 +55,7 @@ export class FileTracker {
       filePath: file,
       beforeContent: before,
       afterContent: after,
-      agentId: this.agentId,
+      editor: this.editor,
       message: options?.message,
       metadata: options?.metadata,
     });
@@ -51,7 +65,7 @@ export class FileTracker {
    * Pre-check for conflicts before editing
    */
   async preCheck(file: string): Promise<PreCheckResult> {
-    return this.session.preCheck(file, this.agentId);
+    return this.session.preCheck(file, this.editor);
   }
 
   /**
@@ -83,23 +97,100 @@ export class FileTracker {
     await this.session.revertFile(file, 0);
   }
 
+  /**
+   * Revert a file to a specific version
+   */
+  async revertToVersion(file: string, version: VersionNum): Promise<void> {
+    await this.session.revertFile(file, version);
+  }
+
+  // ============ Time-Travel API ============
+
+  /**
+   * Get history of changes made by this editor
+   */
+  async getHistory(options?: HistoryOptions): Promise<Version[]> {
+    return this.session.getHistory({
+      ...options,
+      editor: this.editor,
+    });
+  }
+
+  /**
+   * Get history filtered by metadata (for this editor's changes only)
+   */
+  async getHistoryByMetadata(
+    filter: MetadataFilter,
+    options?: HistoryOptions
+  ): Promise<Version[]> {
+    const history = await this.session.getHistoryByMetadata(filter, options);
+    return history.filter((v) => v.editor === this.editor);
+  }
+
+  /**
+   * Get complete timeline for a file (all editors)
+   */
+  async getFileTimeline(file: string, options?: HistoryOptions): Promise<FileTimelineEntry[]> {
+    return this.session.getFileTimeline(file, options);
+  }
+
+  /**
+   * Get content at a specific version
+   */
+  async getContentAtVersion(file: string, version: VersionNum): Promise<string> {
+    return this.session.getContentAtVersion(file, version);
+  }
+
+  /**
+   * Get the diff for a specific version
+   */
+  async getDiff(version: VersionNum): Promise<string> {
+    return this.session.getDiff(version);
+  }
+
+  // ============ Sync API ============
+
+  /**
+   * Sync tracked files with filesystem, detecting external changes.
+   */
+  async sync(options?: SyncOptions): Promise<SyncResult> {
+    return this.session.sync(options);
+  }
+
+  // ============ Surgical Revert API ============
+
+  /**
+   * Check if a version can be reverted surgically.
+   */
+  async canRevertVersion(version: VersionNum): Promise<CanRevertResult> {
+    return this.session.canRevertVersion(version);
+  }
+
+  /**
+   * Surgically revert a specific version by applying its inverse patch.
+   * Returns conflict info for manual resolution if the patch cannot be applied.
+   */
+  async revertVersion(version: VersionNum): Promise<RevertVersionResult> {
+    return this.session.revertVersion(version);
+  }
+
   // ============ Lock Management ============
 
   /**
    * Lock a file for editing.
    * Returns { acquired: true, lock } on success.
-   * Returns { acquired: false, holder, expiresAt } if locked by another agent.
+   * Returns { acquired: false, holder, expiresAt } if locked by another editor.
    */
   async lock(file: string, options?: LockOptions): Promise<LockResult> {
-    return this.session.acquireLock(file, this.agentId, options);
+    return this.session.acquireLock(file, this.editor, options);
   }
 
   /**
    * Unlock a file after editing.
-   * Returns true if lock was released, false if not held by this agent.
+   * Returns true if lock was released, false if not held by this editor.
    */
   async unlock(file: string): Promise<boolean> {
-    return this.session.releaseLock(file, this.agentId);
+    return this.session.releaseLock(file, this.editor);
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "@byfungsi/fun",
-  "version": "0.2.1",
+  "version": "0.4.0",
   "description": "AI-friendly version control for tracking AI file changes",
   "type": "module",
   "main": "./dist/index.js",
