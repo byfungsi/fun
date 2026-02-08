@@ -237,20 +237,25 @@ describe("Track Changes", () => {
     });
   });
 
-  // Skip: FFI doesn't support empty buffers (known limitation)
-  // New file tracking from empty content should be handled with a workaround
-  // it("trackChange() from empty file (new file)", async () => {
-  //   const result = await createTestSession();
-  //   cleanup = result.cleanup;
-  //   const version = await result.session.trackChange({
-  //     filePath: "new-file.txt",
-  //     beforeContent: "",
-  //     afterContent: "new content\n",
-  //     editor: "editor",
-  //   });
-  //   expect(version.additions).toBe(1);
-  //   expect(version.deletions).toBe(0);
-  // });
+  it("trackChange() from empty file (new file)", async () => {
+    const result = await createTestSession();
+    cleanup = result.cleanup;
+
+    const version = await result.session.trackChange({
+      filePath: "new-file.txt",
+      beforeContent: "",
+      afterContent: "new content\nline 2\n",
+      editor: "editor",
+    });
+
+    expect(version.additions).toBe(2);
+    expect(version.deletions).toBe(0);
+
+    const status = await result.session.getStatus();
+    expect(status.currentVersion).toBe(1);
+    expect(status.files.length).toBe(1);
+    expect(status.files[0].existedBefore).toBe(false);
+  });
 
   it("trackChange() adding lines to file", async () => {
     const result = await createTestSession();
@@ -267,19 +272,20 @@ describe("Track Changes", () => {
     expect(version.deletions).toBe(0);
   });
 
-  // Skip: FFI doesn't support empty buffers (known limitation)
-  // it("trackChange() to empty file (file deletion)", async () => {
-  //   const result = await createTestSession();
-  //   cleanup = result.cleanup;
-  //   const version = await result.session.trackChange({
-  //     filePath: "file.txt",
-  //     beforeContent: "content\n",
-  //     afterContent: "",
-  //     editor: "editor",
-  //   });
-  //   expect(version.additions).toBe(0);
-  //   expect(version.deletions).toBe(1);
-  // });
+  it("trackChange() to empty file (file deletion)", async () => {
+    const result = await createTestSession();
+    cleanup = result.cleanup;
+
+    const version = await result.session.trackChange({
+      filePath: "file.txt",
+      beforeContent: "content\nline 2\n",
+      afterContent: "",
+      editor: "editor",
+    });
+
+    expect(version.additions).toBe(0);
+    expect(version.deletions).toBe(2);
+  });
 
   it("trackChange() removing lines from file", async () => {
     const result = await createTestSession();
@@ -362,16 +368,14 @@ describe("Revert Operations", () => {
     expect(content).toBe("v2\n");
   });
 
-  // Skip: FFI doesn't support empty buffers when beforeContent is ""
-  // This tests a similar scenario with non-empty content
-  it("revertFile() for file that was created deletes the file", async () => {
+  it("revertFile() for newly created file (from empty) deletes the file", async () => {
     const result = await createTestSession();
     cleanup = result.cleanup;
 
-    // Track creation of new file (using placeholder as before)
+    // Track creation of new file (empty beforeContent)
     await result.session.trackChange({
       filePath: "new-file.txt",
-      beforeContent: "placeholder\n",
+      beforeContent: "",
       afterContent: "new content\n",
       editor: "editor",
     });
@@ -380,12 +384,11 @@ describe("Revert Operations", () => {
     await writeTestFile(result.projectPath, "new-file.txt", "new content\n");
     expect(await fileExists(result.projectPath, "new-file.txt")).toBe(true);
 
-    // Revert to version 0 (before changes)
+    // Revert to version 0 (before file existed)
     await result.session.revertFile("new-file.txt", 0);
 
-    // File should contain placeholder (original state)
-    const content = await readTestFile(result.projectPath, "new-file.txt");
-    expect(content).toBe("placeholder\n");
+    // File should be deleted since it didn't exist before
+    expect(await fileExists(result.projectPath, "new-file.txt")).toBe(false);
   });
 
   it("revertAll() reverts all tracked files", async () => {
@@ -451,6 +454,33 @@ describe("Content & History", () => {
 
     expect(contentV1).toBe("v1\n");
     expect(contentV2).toBe("v2\n");
+  });
+
+  it("getContentAtVersion() works for newly created files", async () => {
+    const result = await createTestSession();
+    cleanup = result.cleanup;
+
+    // Create a new file (empty beforeContent)
+    await result.session.trackChange({
+      filePath: "new-file.txt",
+      beforeContent: "",
+      afterContent: "initial content\n",
+      editor: "editor",
+    });
+
+    // Modify the file
+    await result.session.trackChange({
+      filePath: "new-file.txt",
+      beforeContent: "initial content\n",
+      afterContent: "modified content\n",
+      editor: "editor",
+    });
+
+    const contentV1 = await result.session.getContentAtVersion("new-file.txt", 1);
+    const contentV2 = await result.session.getContentAtVersion("new-file.txt", 2);
+
+    expect(contentV1).toBe("initial content\n");
+    expect(contentV2).toBe("modified content\n");
   });
 
   it("getHistory() returns versions in reverse order", async () => {

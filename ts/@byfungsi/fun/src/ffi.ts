@@ -325,6 +325,18 @@ export const ffi = {
 
   /** Compute Blake3 hash */
   hash(data: Uint8Array): Uint8Array {
+    // Handle empty data: return the hash of empty content
+    // Blake3 has a well-defined hash for empty input
+    if (data.length === 0) {
+      // Blake3 hash of empty string (precomputed)
+      // This is the standard Blake3 hash of zero bytes
+      return new Uint8Array([
+        0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6,
+        0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc, 0xc9, 0x49,
+        0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7,
+        0xcc, 0x9a, 0x93, 0xca, 0xe4, 0x1f, 0x32, 0x62,
+      ]);
+    }
     const hashBuf = new Uint8Array(32);
     getLib().symbols.fun_hash(ptr(data), data.length, ptr(hashBuf));
     return hashBuf;
@@ -343,6 +355,35 @@ export const ffi = {
     after: string,
     filePath?: string
   ): { success: boolean; diff?: string; errorCode?: number } {
+    const path = filePath || "file";
+
+    // Defensive check: Bun FFI cannot handle zero-length buffers
+    // Handle empty before/after cases in TypeScript to avoid FFI crash
+    if (before === "" && after === "") {
+      return { success: true, diff: "" };
+    }
+
+    if (before === "") {
+      // Generate synthetic "add all" patch for new file
+      const lines = after.split("\n");
+      // Filter out trailing empty line from split if content ends with \n
+      const effectiveLines = after.endsWith("\n") ? lines.slice(0, -1) : lines;
+      const lineCount = effectiveLines.length;
+      const addLines = effectiveLines.map((line) => `+${line}`).join("\n");
+      const diff = `--- a/${path}\n+++ b/${path}\n@@ -0,0 +1,${lineCount} @@\n${addLines}\n`;
+      return { success: true, diff };
+    }
+
+    if (after === "") {
+      // Generate synthetic "delete all" patch for file deletion
+      const lines = before.split("\n");
+      const effectiveLines = before.endsWith("\n") ? lines.slice(0, -1) : lines;
+      const lineCount = effectiveLines.length;
+      const delLines = effectiveLines.map((line) => `-${line}`).join("\n");
+      const diff = `--- a/${path}\n+++ b/${path}\n@@ -1,${lineCount} +0,0 @@\n${delLines}\n`;
+      return { success: true, diff };
+    }
+
     const beforeBuf = new TextEncoder().encode(before);
     const afterBuf = new TextEncoder().encode(after);
 
@@ -377,6 +418,35 @@ export const ffi = {
 
   /** Get patch statistics */
   patchStats(before: string, after: string): PatchStatsRaw {
+    // Handle empty string cases to avoid FFI crash
+    if (before === "" && after === "") {
+      return { additions: 0, deletions: 0, hunks: 0, isEmpty: true };
+    }
+
+    if (before === "") {
+      // New file: count lines as additions
+      const lines = after.split("\n");
+      const effectiveLines = after.endsWith("\n") ? lines.slice(0, -1) : lines;
+      return {
+        additions: effectiveLines.length,
+        deletions: 0,
+        hunks: 1,
+        isEmpty: false,
+      };
+    }
+
+    if (after === "") {
+      // Deleted file: count lines as deletions
+      const lines = before.split("\n");
+      const effectiveLines = before.endsWith("\n") ? lines.slice(0, -1) : lines;
+      return {
+        additions: 0,
+        deletions: effectiveLines.length,
+        hunks: 1,
+        isEmpty: false,
+      };
+    }
+
     const beforeBuf = new TextEncoder().encode(before);
     const afterBuf = new TextEncoder().encode(after);
 
@@ -395,6 +465,39 @@ export const ffi = {
     content: string,
     diff: string
   ): { success: boolean; result?: string; errorCode?: number } {
+    // Handle empty diff (no-op)
+    if (diff === "") {
+      return { success: true, result: content };
+    }
+
+    // Handle empty content with add-only patch (new file creation)
+    // We need to apply the patch manually since FFI can't handle empty content buffer
+    if (content === "") {
+      // Parse the synthetic add-only patch and extract the added lines
+      const lines = diff.split("\n");
+      const addedLines: string[] = [];
+      let inHunk = false;
+      
+      for (const line of lines) {
+        if (line.startsWith("@@")) {
+          inHunk = true;
+          continue;
+        }
+        if (inHunk) {
+          if (line.startsWith("+") && !line.startsWith("+++")) {
+            addedLines.push(line.slice(1));
+          }
+          // Skip context and delete lines
+        }
+      }
+      
+      if (addedLines.length > 0) {
+        return { success: true, result: addedLines.join("\n") + "\n" };
+      }
+      // If no added lines found, return empty
+      return { success: true, result: "" };
+    }
+
     const contentBuf = new TextEncoder().encode(content);
     const diffBuf = new TextEncoder().encode(diff);
 
